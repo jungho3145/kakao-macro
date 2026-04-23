@@ -1,0 +1,77 @@
+name: Build Windows .exe
+
+# 이 워크플로는 Windows 러너에서 PyInstaller + Inno Setup을 돌려
+# KakaoMacro.exe 와 KakaoMacroSetup.exe 를 생성한다.
+#
+# 트리거:
+#   - 수동 실행 (workflow_dispatch)
+#   - v* 태그 푸시 시 자동 빌드 + GitHub Release 생성
+#
+# 산출물:
+#   - Actions → Artifacts 에서 다운로드 (30일 보관)
+#   - v* 태그 푸시 시 Release 페이지에 .exe 자동 업로드
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # Release 생성 권한
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build KakaoMacro.exe (PyInstaller)
+        working-directory: build
+        run: pyinstaller --clean --noconfirm KakaoMacro.spec
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress --yes
+
+      - name: Build installer (Inno Setup)
+        working-directory: build
+        shell: cmd
+        run: |
+          "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" installer.iss
+
+      - name: List build artifacts
+        shell: pwsh
+        run: |
+          Get-ChildItem build\dist
+          Get-ChildItem build -Filter *.exe
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: KakaoMacro-Windows
+          path: |
+            build/dist/KakaoMacro.exe
+            build/KakaoMacroSetup.exe
+          retention-days: 30
+
+      - name: Create Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/dist/KakaoMacro.exe
+            build/KakaoMacroSetup.exe
+          generate_release_notes: true

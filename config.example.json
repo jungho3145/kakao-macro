@@ -1,0 +1,12 @@
+{
+  "click_positions": [
+    [1200, 450],
+    [1200, 520],
+    [1200, 880]
+  ],
+  "comment_text": "참여합니다!",
+  "target_time_kst": "2026-04-23 20:00:00",
+  "submit_with_enter": true,
+  "step_delay_seconds": 0.25,
+  "window_title_contains": "카카오톡"
+}

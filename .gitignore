@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+config.json
+*.egg-info/
+.DS_Store
+
+# 로컬 Python 런타임 (install.bat으로 생성됨)
+/python/
+
+# PyInstaller 산출물
+/build/dist/
+/build/build/
+/build/*.exe
+/build/KakaoMacroSetup.exe
+
