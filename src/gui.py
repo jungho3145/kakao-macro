@@ -26,11 +26,38 @@ KST = timezone(timedelta(hours=9))
 DEFAULT_CONFIG_PATH = Path("config.json")
 
 
+def _enable_windows_dpi_awareness() -> None:
+    """Windows에서 DPI 스케일(125%/150%)이 걸려도 UI가 흐려지거나 잘리지 않도록.
+
+    Tkinter는 기본적으로 DPI를 인식하지 못해 OS가 DWM 스트레칭으로 확대하는데,
+    이 경우 텍스트가 흐려지고 위젯이 의도보다 작게/크게 그려진다. 프로세스를
+    Per-Monitor DPI Aware로 표시해 두면 Tk가 네이티브 픽셀로 그린다.
+    """
+    try:
+        from ctypes import windll  # Windows에서만 존재
+        # 2 = PROCESS_PER_MONITOR_DPI_AWARE (Win 8.1+)
+        windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:  # noqa: BLE001 — 비-Windows 또는 구버전 → 무시
+        pass
+
+
 class MacroApp:
+    # 초기 / 최소 창 크기. 한국어 라벨은 영문보다 너비를 더 먹기 때문에
+    # 라벨/버튼이 잘리지 않도록 여유를 둔다.
+    INITIAL_GEOMETRY = "780x920"
+    MIN_WIDTH = 640
+    MIN_HEIGHT = 760
+
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         root.title("카카오톡 공지 댓글 매크로")
-        root.geometry("560x640")
+        root.geometry(self.INITIAL_GEOMETRY)
+        root.minsize(self.MIN_WIDTH, self.MIN_HEIGHT)
+        # 화면 가운데 정렬
+        root.update_idletasks()
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        w, h = root.winfo_width(), root.winfo_height()
+        root.geometry(f"+{(sw - w) // 2}+{max(20, (sh - h) // 2 - 20)}")
 
         self.cfg = MacroConfig.load(DEFAULT_CONFIG_PATH) if DEFAULT_CONFIG_PATH.exists() else MacroConfig()
         self.offset: TimeOffset | None = None
@@ -66,7 +93,7 @@ class MacroApp:
 
         frm_text = ttk.LabelFrame(self.root, text="2. 댓글 내용")
         frm_text.pack(fill="both", expand=True, **pad)
-        self.text_box = scrolledtext.ScrolledText(frm_text, height=6, wrap="word")
+        self.text_box = scrolledtext.ScrolledText(frm_text, height=8, wrap="word", font=("Malgun Gothic", 10))
         self.text_box.pack(fill="both", expand=True, padx=6, pady=6)
         self.text_box.insert("1.0", self.cfg.comment_text)
 
@@ -101,7 +128,10 @@ class MacroApp:
 
         frm_status = ttk.LabelFrame(self.root, text="상태")
         frm_status.pack(fill="both", expand=True, **pad)
-        self.status = scrolledtext.ScrolledText(frm_status, height=8, state="disabled", bg="#111", fg="#eee")
+        self.status = scrolledtext.ScrolledText(
+            frm_status, height=10, state="disabled",
+            bg="#111", fg="#eee", font=("Consolas", 9),
+        )
         self.status.pack(fill="both", expand=True, padx=6, pady=6)
 
         frm_cancel = ttk.Frame(self.root)
@@ -286,7 +316,14 @@ class MacroApp:
 
 def launch() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    _enable_windows_dpi_awareness()
     root = tk.Tk()
+    # Tk 8.6의 기본 DPI 처리: tk scaling을 시스템 DPI에 맞춘다.
+    try:
+        dpi = root.winfo_fpixels("1i")  # 1인치 = 몇 픽셀
+        root.tk.call("tk", "scaling", dpi / 72.0)
+    except Exception:  # noqa: BLE001
+        pass
     MacroApp(root)
     root.mainloop()
 
