@@ -1,7 +1,7 @@
 """GUI — 일반 사용자가 한 화면에서 모든 설정을 끝내고 실행할 수 있도록 한다.
 
-전문 용어를 피하고 한국어 설명 위주로 라벨을 구성했다. 시간 동기화/스케줄링 같은
-내부 동작은 백그라운드 스레드에서 실행하고, 진행 상황을 하단 로그창에 표시한다.
+주된 위치 지정 방식은 "화면 보고 위치 정하기" 모달(스크린샷 클릭)이다. 마우스
+좌표를 직접 다루는 옛 방식은 ‘고급 옵션’ 안에 폴백으로 보존했다.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ import pyautogui
 from .config import MacroConfig
 from .kakao_automation import CommentPlan, execute_plan, focus_kakao_window
 from .scheduler import parse_kst
+from .screen_picker import pick_positions
 from .time_sync import TimeOffset, fetch_offset
 
 logger = logging.getLogger(__name__)
@@ -36,27 +37,26 @@ def _enable_windows_dpi_awareness() -> None:
 
 
 class MacroApp:
-    INITIAL_GEOMETRY = "960x1100"
+    INITIAL_GEOMETRY = "920x980"
     MIN_WIDTH = 820
-    MIN_HEIGHT = 940
+    MIN_HEIGHT = 880
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         root.title("카카오톡 공지 댓글 매크로")
         root.geometry(self.INITIAL_GEOMETRY)
         root.minsize(self.MIN_WIDTH, self.MIN_HEIGHT)
-        # 화면 가운데 정렬
         root.update_idletasks()
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
         w, h = root.winfo_width(), root.winfo_height()
-        x = max(0, (sw - w) // 2)
-        y = max(0, (sh - h) // 2 - 30)
-        root.geometry(f"+{x}+{y}")
+        root.geometry(f"+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2 - 30)}")
 
         self.cfg = MacroConfig.load(DEFAULT_CONFIG_PATH) if DEFAULT_CONFIG_PATH.exists() else MacroConfig()
         self.offset: TimeOffset | None = None
         self.worker: threading.Thread | None = None
         self.cancel_flag = threading.Event()
+
+        self._advanced_visible = False
 
         self._build_ui()
         self._refresh_positions_view()
@@ -66,62 +66,67 @@ class MacroApp:
     def _build_ui(self) -> None:
         pad = {"padx": 12, "pady": 6}
 
-        # ---- 1. 댓글 입력창까지 클릭할 위치 -------------------------------
-        frm_top = ttk.LabelFrame(self.root, text="1. 댓글 입력창까지 클릭할 위치")
-        frm_top.pack(fill="x", **pad)
+        # ---- 1. 클릭할 위치 정하기 ------------------------------------------
+        frm_pos = ttk.LabelFrame(self.root, text="1. 클릭할 위치 정하기")
+        frm_pos.pack(fill="x", **pad)
 
         ttk.Label(
-            frm_top,
-            text="카카오톡 화면에서 댓글을 다는 데까지 거쳐야 하는 클릭들을 순서대로 저장합니다.\n"
-                 "예: ① 공지 아이콘 → ② 댓글 달 공지 → ③ 댓글 입력창 클릭\n"
-                 "이미 공지를 열어 두셨다면 ‘댓글 입력창’ 한 곳만 저장하셔도 됩니다.",
+            frm_pos,
+            text="아래 버튼을 누르면 매크로 창이 잠깐 사라지고, 현재 화면이 그대로 캡처됩니다.\n"
+                 "그 화면 위에서 ① 댓글 입력창과 ② [등록] 버튼을 차례로 클릭만 하면 됩니다.",
             foreground="#444", justify="left",
-        ).pack(anchor="w", padx=8, pady=(4, 6))
+        ).pack(anchor="w", padx=10, pady=(6, 4))
 
-        self.positions_var = tk.StringVar(value="(아직 저장된 위치가 없습니다)")
-        ttk.Label(frm_top, textvariable=self.positions_var, foreground="#0066aa", wraplength=900,
-                  justify="left").pack(anchor="w", padx=8, pady=2)
+        # 큰 기본 버튼
+        big_btn = tk.Button(
+            frm_pos, text="📷  화면 보고 위치 정하기 (추천)",
+            command=self.open_screen_picker,
+            font=("Malgun Gothic", 12, "bold"),
+            bg="#2563eb", fg="white", activebackground="#1d4ed8", activeforeground="white",
+            cursor="hand2", relief="flat", padx=18, pady=10,
+        )
+        big_btn.pack(anchor="w", padx=10, pady=(2, 8))
 
-        btn_row = ttk.Frame(frm_top)
-        btn_row.pack(fill="x", padx=6, pady=6)
-        ttk.Button(btn_row, text="현재 마우스 위치 저장", command=self.add_current_position).pack(side="left")
-        ttk.Button(btn_row, text="3초 뒤 마우스 위치 저장", command=self.capture_after_delay).pack(side="left", padx=6)
-        ttk.Button(btn_row, text="모두 지우기", command=self.clear_positions).pack(side="left")
+        ttk.Label(
+            frm_pos, text="위 버튼을 누르기 전에 카카오톡에서 댓글을 달 공지 화면을 미리 띄워 두세요.",
+            foreground="#777",
+        ).pack(anchor="w", padx=10, pady=(0, 6))
+
+        ttk.Separator(frm_pos, orient="horizontal").pack(fill="x", padx=10, pady=4)
+
+        # 저장된 위치 표시
+        status_box = ttk.Frame(frm_pos)
+        status_box.pack(fill="x", padx=10, pady=(4, 8))
+
+        self.input_pos_var = tk.StringVar()
+        self.submit_pos_var = tk.StringVar()
+        ttk.Label(status_box, textvariable=self.input_pos_var,
+                  foreground="#0066aa", font=("Malgun Gothic", 10, "bold")).pack(anchor="w", pady=2)
+        ttk.Label(status_box, textvariable=self.submit_pos_var,
+                  foreground="#0066aa", font=("Malgun Gothic", 10, "bold")).pack(anchor="w", pady=2)
+
+        # 고급 토글 + 영역
+        self.advanced_btn = ttk.Button(
+            frm_pos, text="▶ 고급 옵션 (마우스 위치로 직접 저장)",
+            command=self.toggle_advanced,
+        )
+        self.advanced_btn.pack(anchor="w", padx=10, pady=(4, 6))
+
+        self.frm_advanced = ttk.Frame(frm_pos)
+        self._build_advanced_ui(self.frm_advanced)
+        # 고급 영역은 기본 숨김
 
         # ---- 2. 댓글 내용 ---------------------------------------------------
         frm_text = ttk.LabelFrame(self.root, text="2. 등록할 댓글 내용")
         frm_text.pack(fill="both", expand=True, **pad)
-        self.text_box = scrolledtext.ScrolledText(frm_text, height=6, wrap="word",
-                                                  font=("Malgun Gothic", 11))
+        self.text_box = scrolledtext.ScrolledText(
+            frm_text, height=5, wrap="word", font=("Malgun Gothic", 11),
+        )
         self.text_box.pack(fill="both", expand=True, padx=6, pady=6)
         self.text_box.insert("1.0", self.cfg.comment_text)
 
-        # ---- 3. 등록 버튼 위치 ----------------------------------------------
-        frm_submit = ttk.LabelFrame(self.root, text="3. ‘등록’ 버튼 위치 (필수)")
-        frm_submit.pack(fill="x", **pad)
-
-        ttk.Label(
-            frm_submit,
-            text="카카오톡 공지 댓글은 Enter 키로는 등록되지 않고 ‘등록’ 버튼을 눌러야 등록됩니다.\n"
-                 "댓글 내용을 입력했을 때 나타나는 [등록] 버튼 위에 마우스를 올린 뒤 아래 버튼을 누르세요.",
-            foreground="#444", justify="left",
-        ).pack(anchor="w", padx=8, pady=(4, 6))
-
-        self.submit_pos_var = tk.StringVar()
-        ttk.Label(frm_submit, textvariable=self.submit_pos_var,
-                  foreground="#0066aa").pack(anchor="w", padx=8, pady=2)
-
-        srow = ttk.Frame(frm_submit)
-        srow.pack(fill="x", padx=6, pady=6)
-        ttk.Button(srow, text="현재 마우스 위치를 ‘등록 버튼’으로 저장",
-                   command=self.set_submit_button_now).pack(side="left")
-        ttk.Button(srow, text="3초 뒤 ‘등록 버튼’ 위치 저장",
-                   command=self.set_submit_button_delayed).pack(side="left", padx=6)
-        ttk.Button(srow, text="등록 버튼 지우기",
-                   command=self.clear_submit_button).pack(side="left")
-
-        # ---- 4. 등록할 시각 -------------------------------------------------
-        frm_time = ttk.LabelFrame(self.root, text="4. 등록할 시각 (한국 시간)")
+        # ---- 3. 등록할 시각 -------------------------------------------------
+        frm_time = ttk.LabelFrame(self.root, text="3. 등록할 시각 (한국 시간)")
         frm_time.pack(fill="x", **pad)
         self.time_var = tk.StringVar(value=self.cfg.target_time_kst or self._default_target_time())
         ttk.Entry(frm_time, textvariable=self.time_var, font=("Consolas", 11)).pack(fill="x", padx=6, pady=4)
@@ -132,8 +137,8 @@ class MacroApp:
             foreground="#666", justify="left",
         ).pack(anchor="w", padx=8, pady=(0, 4))
 
-        # ---- 5. 세부 설정 ---------------------------------------------------
-        frm_opts = ttk.LabelFrame(self.root, text="5. 세부 설정 (보통은 그대로 두세요)")
+        # ---- 4. 세부 설정 ---------------------------------------------------
+        frm_opts = ttk.LabelFrame(self.root, text="4. 세부 설정 (보통은 그대로 두세요)")
         frm_opts.pack(fill="x", **pad)
 
         row = ttk.Frame(frm_opts)
@@ -167,7 +172,7 @@ class MacroApp:
         frm_status = ttk.LabelFrame(self.root, text="진행 상태")
         frm_status.pack(fill="both", expand=True, **pad)
         self.status = scrolledtext.ScrolledText(
-            frm_status, height=10, state="disabled",
+            frm_status, height=8, state="disabled",
             bg="#0e0e0e", fg="#e8e8e8", font=("Consolas", 10),
         )
         self.status.pack(fill="both", expand=True, padx=6, pady=6)
@@ -176,9 +181,54 @@ class MacroApp:
         frm_cancel.pack(fill="x", **pad)
         ttk.Button(frm_cancel, text="실행 중단", command=self.cancel).pack(side="right")
 
+    def _build_advanced_ui(self, parent: ttk.Frame) -> None:
+        """고급 옵션 — 기존 마우스 위치 캡처 방식을 보존."""
+        ttk.Label(
+            parent,
+            text="화면 캡처 방식이 잘 안 될 때 사용하세요. 마우스를 정확한 자리에 둔 뒤\n"
+                 "해당 버튼을 누르거나 ‘3초 뒤 저장’을 누르고 마우스를 그 자리에 두세요.",
+            foreground="#666", justify="left",
+        ).pack(anchor="w", padx=8, pady=(6, 4))
+
+        # 클릭할 위치들
+        sub1 = ttk.LabelFrame(parent, text="댓글 입력창까지의 클릭 (여러 단계 가능)")
+        sub1.pack(fill="x", padx=6, pady=4)
+
+        self.positions_list_var = tk.StringVar()
+        ttk.Label(sub1, textvariable=self.positions_list_var,
+                  foreground="#0066aa", wraplength=820, justify="left").pack(anchor="w", padx=8, pady=4)
+
+        row1 = ttk.Frame(sub1)
+        row1.pack(fill="x", padx=6, pady=4)
+        ttk.Button(row1, text="현재 마우스 위치 추가", command=self.add_current_position).pack(side="left")
+        ttk.Button(row1, text="3초 뒤 마우스 위치 추가", command=self.capture_after_delay).pack(side="left", padx=6)
+        ttk.Button(row1, text="모두 지우기", command=self.clear_positions).pack(side="left")
+
+        # 등록 버튼 위치
+        sub2 = ttk.LabelFrame(parent, text="등록 버튼 위치")
+        sub2.pack(fill="x", padx=6, pady=4)
+
+        row2 = ttk.Frame(sub2)
+        row2.pack(fill="x", padx=6, pady=4)
+        ttk.Button(row2, text="현재 마우스 위치를 등록 버튼으로 저장",
+                   command=self.set_submit_button_now).pack(side="left")
+        ttk.Button(row2, text="3초 뒤 등록 버튼 위치 저장",
+                   command=self.set_submit_button_delayed).pack(side="left", padx=6)
+        ttk.Button(row2, text="등록 버튼 지우기",
+                   command=self.clear_submit_button).pack(side="left")
+
+    def toggle_advanced(self) -> None:
+        if self._advanced_visible:
+            self.frm_advanced.pack_forget()
+            self.advanced_btn.config(text="▶ 고급 옵션 (마우스 위치로 직접 저장)")
+            self._advanced_visible = False
+        else:
+            self.frm_advanced.pack(fill="x", padx=10, pady=(4, 8))
+            self.advanced_btn.config(text="▼ 고급 옵션 (마우스 위치로 직접 저장)")
+            self._advanced_visible = True
+
     # ===== 헬퍼 ==============================================================
     def _default_target_time(self) -> str:
-        """기본값: 1분 뒤 정각."""
         now = datetime.now(tz=KST).replace(second=0, microsecond=0) + timedelta(minutes=1)
         return now.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -191,25 +241,66 @@ class MacroApp:
         self.root.after(0, append)
 
     def _refresh_positions_view(self) -> None:
+        # 기본 표시: 마지막 위치를 ‘댓글 입력창’ 위치로 본다
         if not self.cfg.click_positions:
-            self.positions_var.set("(아직 저장된 위치가 없습니다)")
-            return
-        parts = [f"{i+1}번째: ({x}, {y})" for i, (x, y) in enumerate(self.cfg.click_positions)]
-        self.positions_var.set("   ".join(parts))
+            self.input_pos_var.set("①  댓글 입력창 위치:  (아직 정해지지 않았습니다)")
+        else:
+            x, y = self.cfg.click_positions[-1]
+            extra = ""
+            if len(self.cfg.click_positions) > 1:
+                extra = f"  + 그 전에 {len(self.cfg.click_positions) - 1}단계의 추가 클릭"
+            self.input_pos_var.set(f"①  댓글 입력창 위치:  ({x}, {y}){extra}")
+        # 고급 영역의 상세 목록도 갱신
+        if hasattr(self, "positions_list_var"):
+            if not self.cfg.click_positions:
+                self.positions_list_var.set("(저장된 클릭이 없습니다)")
+            else:
+                parts = [f"{i+1}) ({x}, {y})" for i, (x, y) in enumerate(self.cfg.click_positions)]
+                self.positions_list_var.set("   ".join(parts))
 
     def _refresh_submit_button_view(self) -> None:
         if self.cfg.submit_button_position is None:
-            self.submit_pos_var.set("(등록 버튼 위치가 저장되지 않았습니다)")
+            self.submit_pos_var.set("②  [등록] 버튼 위치:  (아직 정해지지 않았습니다)")
         else:
             x, y = self.cfg.submit_button_position
-            self.submit_pos_var.set(f"등록 버튼 위치: ({x}, {y})")
+            self.submit_pos_var.set(f"②  [등록] 버튼 위치:  ({x}, {y})")
 
-    # ===== 1. 클릭 위치 ======================================================
+    # ===== 화면 보고 위치 정하기 =============================================
+    def open_screen_picker(self) -> None:
+        self.log("화면을 캡처합니다... 매크로 창이 잠시 사라집니다.")
+        try:
+            result = pick_positions(self.root)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"화면 캡처에 실패했습니다: {exc}")
+            messagebox.showerror(
+                "화면 캡처 실패",
+                f"화면 캡처에 실패했습니다.\n\n{exc}\n\n"
+                "‘고급 옵션’의 마우스 위치 저장을 사용해 보세요.",
+            )
+            return
+
+        if not result.confirmed:
+            self.log("화면 캡처가 취소되었습니다.")
+            return
+
+        # 단순 모드: 입력창 1개 + 등록 버튼 1개로 덮어쓰기
+        if result.input_position is not None:
+            self.cfg.click_positions = [result.input_position]
+        if result.submit_position is not None:
+            self.cfg.submit_button_position = result.submit_position
+        self._refresh_positions_view()
+        self._refresh_submit_button_view()
+        self.log(
+            f"위치 저장 완료 — 입력창 {result.input_position}, "
+            f"등록 버튼 {result.submit_position}"
+        )
+
+    # ===== 고급(마우스) — 클릭 위치 ==========================================
     def add_current_position(self) -> None:
         pos = pyautogui.position()
         self.cfg.click_positions.append((int(pos.x), int(pos.y)))
         self._refresh_positions_view()
-        self.log(f"클릭 위치 저장: ({pos.x}, {pos.y})")
+        self.log(f"클릭 위치 추가: ({pos.x}, {pos.y})")
 
     def capture_after_delay(self) -> None:
         def worker() -> None:
@@ -219,7 +310,7 @@ class MacroApp:
             pos = pyautogui.position()
             self.cfg.click_positions.append((int(pos.x), int(pos.y)))
             self.root.after(0, self._refresh_positions_view)
-            self.log(f"클릭 위치 저장(3초 뒤): ({pos.x}, {pos.y})")
+            self.log(f"클릭 위치 추가(3초 뒤): ({pos.x}, {pos.y})")
         threading.Thread(target=worker, daemon=True).start()
 
     def clear_positions(self) -> None:
@@ -227,7 +318,7 @@ class MacroApp:
         self._refresh_positions_view()
         self.log("저장된 클릭 위치를 모두 지웠습니다.")
 
-    # ===== 3. 등록 버튼 ======================================================
+    # ===== 고급(마우스) — 등록 버튼 ==========================================
     def set_submit_button_now(self) -> None:
         pos = pyautogui.position()
         self.cfg.submit_button_position = (int(pos.x), int(pos.y))
@@ -286,9 +377,7 @@ class MacroApp:
             try:
                 self.offset = fetch_offset()
                 gap_ms = self.offset.offset_seconds * 1000.0
-                self.log(
-                    f"서버 시간 동기화 완료 (내 컴퓨터 시계와의 차이: {gap_ms:+.1f}ms)"
-                )
+                self.log(f"서버 시간 동기화 완료 (내 컴퓨터 시계와의 차이: {gap_ms:+.1f}ms)")
             except Exception as exc:  # noqa: BLE001
                 self.log(f"서버 시간 가져오기에 실패했습니다: {exc}")
                 self.offset = None
@@ -308,8 +397,8 @@ class MacroApp:
 
         if not self.cfg.click_positions:
             messagebox.showwarning(
-                "위치를 먼저 저장해 주세요",
-                "‘1. 댓글 입력창까지 클릭할 위치’에서 최소 한 곳 이상의 위치를 저장해야 합니다.",
+                "위치를 먼저 정해 주세요",
+                "‘1. 클릭할 위치 정하기’에서 ‘화면 보고 위치 정하기’ 버튼을 눌러 위치를 저장해 주세요.",
             )
             return
         if not self.cfg.comment_text.strip():
@@ -319,7 +408,7 @@ class MacroApp:
             ok = messagebox.askyesno(
                 "등록 버튼 위치가 없습니다",
                 "카카오톡 공지 댓글은 Enter 키로 등록되지 않고 ‘등록’ 버튼을 클릭해야 등록됩니다.\n\n"
-                "등록 버튼 위치를 저장하지 않은 상태입니다. 그래도 진행하시겠습니까?\n"
+                "‘등록 버튼 위치’가 정해지지 않은 상태입니다. 그래도 진행하시겠습니까?\n"
                 "(이 경우 Enter 키로 시도되며 댓글이 등록되지 않을 수 있습니다.)",
             )
             if not ok:
@@ -344,10 +433,7 @@ class MacroApp:
             if self.offset is None:
                 self.log("먼저 서버 시간을 동기화합니다...")
                 self.offset = fetch_offset()
-                self.log(
-                    f"서버 시간 동기화 완료 "
-                    f"(차이: {self.offset.offset_seconds*1000:+.1f}ms)"
-                )
+                self.log(f"서버 시간 동기화 완료 (차이: {self.offset.offset_seconds*1000:+.1f}ms)")
             offset = self.offset
 
             plan = CommentPlan(
@@ -378,7 +464,6 @@ class MacroApp:
                     self.log(f"  남은 시간 {sec}초")
                     last_tick = sec
 
-                # 5초 이하 진입 시 한 번만 카카오톡 창을 앞으로 가져옴
                 if not focused and rem <= 5.0:
                     if focus_kakao_window(self.cfg.window_title_contains):
                         self.log("카카오톡 창을 앞으로 가져왔습니다.")
@@ -386,7 +471,6 @@ class MacroApp:
 
                 time.sleep(min(0.2, max(0.01, rem - 0.05)))
 
-            # 마지막 50ms는 정밀 대기
             while offset.now() < target_epoch:
                 if self.cancel_flag.is_set():
                     self.log("사용자가 중단했습니다.")
@@ -405,9 +489,8 @@ def launch() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     _enable_windows_dpi_awareness()
     root = tk.Tk()
-    # 시스템 DPI에 맞춰 Tk 위젯 크기 보정
     try:
-        dpi = root.winfo_fpixels("1i")  # 1인치당 픽셀
+        dpi = root.winfo_fpixels("1i")
         root.tk.call("tk", "scaling", dpi / 72.0)
     except Exception:  # noqa: BLE001
         pass

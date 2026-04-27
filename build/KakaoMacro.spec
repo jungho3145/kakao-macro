@@ -26,7 +26,7 @@ a = Analysis(
     ],
     hiddenimports=[
         # pyautogui, pyperclip, pygetwindow, ntplib 는 자동 감지되지만
-        # Windows 한정 서브모듈을 명시
+        # Windows 한정 서브모듈 및 ImageTk(스크린샷 picker용)를 명시
         "pyperclip",
         "pygetwindow",
         "ntplib",
@@ -34,6 +34,7 @@ a = Analysis(
         "keyboard",
         "PIL.Image",
         "PIL.ImageGrab",
+        "PIL.ImageTk",
     ],
     hookspath=[],
     hooksconfig={},
