@@ -44,9 +44,12 @@ UninstallDisplayName={#AppName}
 LanguageDetectionMethod=locale
 ShowLanguageDialog=auto
 
-; 아키텍처
-ArchitecturesInstallIn64BitMode=x64
-ArchitecturesAllowed=x64
+; 아키텍처 — x64 네이티브 + ARM64(x64 에뮬레이션) 모두 허용.
+; "x64compatible"는 Inno Setup 6.3+에서 지원되며, 다음 조건에서 true:
+;   - 진짜 x64 Windows
+;   - ARM64 Windows에서 x64 에뮬레이션 가능 (Win11 ARM의 Prism 등)
+ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed=x64compatible
 
 [Languages]
 Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
